@@ -9,7 +9,7 @@
  * Modify Date: 2012/02/01
  * Description:
  * 	This is the header file for an implemenation of a simple FIFO queue.
- * 
+ *
  */
 
 #ifndef QUEUE_H
@@ -22,11 +22,11 @@
 #define QUEUE_FAILURE -1
 #define QUEUE_SUCCESS 0
 
-typedef struct queue_node_s{
+typedef struct queue_node_s {
     void* payload;
 } queue_node;
 
-typedef struct queue_s{
+typedef struct queue_s {
     queue_node* array;
     int front;
     int rear;

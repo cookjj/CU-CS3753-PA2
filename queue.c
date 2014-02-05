@@ -9,35 +9,35 @@
  * Modify Date: 2012/02/01
  * Description:
  * 	This file contains an implementation of a simple FIFO queue.
- *  
+ *
  */
 
 #include <stdlib.h>
 
 #include "queue.h"
 
-int queue_init(queue* q, int size){
-    
+int queue_init(queue* q, int size)
+{
+
     int i;
 
     /* user specified size or default */
     if(size>0) {
-	q->maxSize = size;
-    }
-    else {
-	q->maxSize = QUEUEMAXSIZE;
+        q->maxSize = size;
+    } else {
+        q->maxSize = QUEUEMAXSIZE;
     }
 
     /* malloc array */
     q->array = malloc(sizeof(queue_node) * (q->maxSize));
-    if(!(q->array)){	
-	perror("Error on queue Malloc");
-	return QUEUE_FAILURE;
+    if(!(q->array)) {
+        perror("Error on queue Malloc");
+        return QUEUE_FAILURE;
     }
 
     /* Set to NULL */
-    for(i=0; i < q->maxSize; ++i){
-	q->array[i].payload = NULL;
+    for(i=0; i < q->maxSize; ++i) {
+        q->array[i].payload = NULL;
     }
 
     /* setup circular buffer values */
@@ -47,31 +47,32 @@ int queue_init(queue* q, int size){
     return q->maxSize;
 }
 
-int queue_is_empty(queue* q){
-    if((q->front == q->rear) && (q->array[q->front].payload == NULL)){
-	return 1;
-    }
-    else{
-	return 0;
-    }
-}
-
-int queue_is_full(queue* q){
-    if((q->front == q->rear) && (q->array[q->front].payload != NULL)){
-	return 1;
-    }
-    else{
-	return 0;
+int queue_is_empty(queue* q)
+{
+    if((q->front == q->rear) && (q->array[q->front].payload == NULL)) {
+        return 1;
+    } else {
+        return 0;
     }
 }
 
-void* queue_pop(queue* q){
+int queue_is_full(queue* q)
+{
+    if((q->front == q->rear) && (q->array[q->front].payload != NULL)) {
+        return 1;
+    } else {
+        return 0;
+    }
+}
+
+void* queue_pop(queue* q)
+{
     void* ret_payload;
-	
-    if(queue_is_empty(q)){
-	return NULL;
+
+    if(queue_is_empty(q)) {
+        return NULL;
     }
-	
+
     ret_payload = q->array[q->front].payload;
     q->array[q->front].payload = NULL;
     q->front = ((q->front + 1) % q->maxSize);
@@ -79,10 +80,11 @@ void* queue_pop(queue* q){
     return ret_payload;
 }
 
-int queue_push(queue* q, void* new_payload){
-    
-    if(queue_is_full(q)){
-	return QUEUE_FAILURE;
+int queue_push(queue* q, void* new_payload)
+{
+
+    if(queue_is_full(q)) {
+        return QUEUE_FAILURE;
     }
 
     q->array[q->rear].payload = new_payload;
@@ -94,8 +96,8 @@ int queue_push(queue* q, void* new_payload){
 
 void queue_cleanup(queue* q)
 {
-    while(!queue_is_empty(q)){
-	queue_pop(q);
+    while(!queue_is_empty(q)) {
+        queue_pop(q);
     }
 
     free(q->array);
