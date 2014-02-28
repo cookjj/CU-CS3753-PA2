@@ -6,3 +6,10 @@ static inline int num_processors(void)
 }
 
 
+int
+nthreads(int min)
+{
+    int cores = num_processors();
+    return cores > min ? cores : min;
+}
+
