@@ -77,6 +77,7 @@ request_on_file(void *fname)
         }
     }
 
+    // race condition; must be protected
     pthread_mutex_lock(&fm);
     fill_success[donei++] = COMPLETE;
     pthread_mutex_unlock(&fm);
