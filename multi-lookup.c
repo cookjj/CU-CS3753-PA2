@@ -34,6 +34,7 @@ pthread_mutex_t qm;
 int
 request_on_file(char *fname)
 {
+    int err;
     char hostname[SBUFSIZE];
 
     FILE *infile = fopen(fname, "r");
@@ -46,7 +47,12 @@ request_on_file(char *fname)
     /* write lines to queue when possible
        until file completely processed, then return */
     while(fscanf(infile, INPUTFS, hostname) > 0) {
-        try_queue_push(hostname);
+retry_push:
+        err = try_queue_push(hostname);
+        if(err == 1) { // queue full
+            usleep(random()%100);
+            goto retry_push;
+        }
     }
 
     fclose(inputfp);
@@ -100,9 +106,7 @@ look(void)
         if(try_write_out(outline) != 0) {
             fprintf(stderr, "fail in writing to file\n");
         }
-
     }
-
     return EXIT_SUCCESS;
 }
 
@@ -111,7 +115,8 @@ look(void)
 /* Safely get a hostname from queue, write it into buf.
    Returns: 0 for okay, or QUEUE_EMPTY in that case.
  */
-int try_queue_pop(char *buf)
+int
+try_queue_pop(char *buf)
 {
     int ret;
     char *top;
@@ -125,22 +130,45 @@ int try_queue_pop(char *buf)
         top = queue_pop(q);
         if(top) {
             strncpy(top, buf, SBUFSIZE);
+            free(top);
         }
         ret = 0; // good
     }
+
     pthread_mutex_unlock(&qm);
     return ret;
 }
 
 
 
-/* Safely add a line to queue */
+/* Safely add a line to queue. Sleep 0-100us if Q full. */
+/* Return 0 on success.
+   1 on queue full,
+  -1 catastrophic failure. */
 int
-try_queue_push(char *)
+try_queue_push(char *buf)
 {
-    int success = 0;
+    int ret, n;
+    char *str;
+    ret = -1;
 
-    return success;
+    // acquire locked access
+    pthread_mutex_lock(&qm);
+    if(queue_is_full(q)) {
+        ret = 1;
+    } else {
+        n = strlen(buf);
+        str = malloc(n * sizeof(char));
+        strncpy(str, buf, n);
+        ret = 0; // note placement in case of failure
+        if(queue_push(q, str) == QUEUE_FAILURE) {
+            fprintf(2, "Q push failure\n");
+            ret = -1;
+        }
+    }
+
+    pthread_mutex_unlock(&qm);
+    return ret;
 }
 
 
@@ -162,7 +190,8 @@ try_write_out(char *line)
 /* Verify input arguments: that files exists.
    Return ready FILE* to output file.
 */
-FILE *process_args(int argc, char **argv)
+FILE *
+process_args(int argc, char **argv)
 {
     /* Check Arguments */
     if(argc < MINARGS) {

@@ -7,10 +7,10 @@ int request_on_file(char *fname);
 int look(void);
 
 int try_queue_push(char *host);
+int try_queue_pop(char *buf);
 int try_write_out(char *line);
 
 int finished(void);
-int try_pop(char *buf);
 
 
 
