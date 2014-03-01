@@ -28,8 +28,9 @@ int *fill_success;
 
 pthread_t *req_tpool;
 queue q;
-pthread_mutex_t qm;
 
+pthread_mutex_t qm;
+pthread_mutex_t fm;
 
 /* Check saved return values from q request filling
    threads to see if they're all done. */
@@ -37,17 +38,11 @@ int
 fill_complete(void)
 {
     int i, val;
-/*
-    for(i = 0; i < n_infiles; i++) {
-        val = fill_success[i];
-        printf("val[%d] == %d\n", i, val);
-        if(val != COMPLETE)
-            return 0;
-    }*/
 
     for(i = 0; i < n_infiles; i++) {
-        val = pthread_kill(req_tpool[i], 0);
-        if(val == 0) return 0; // still going
+        val = fill_success[i];
+        if(val != COMPLETE)
+            return 0;
     }
 
     return 1;
@@ -72,12 +67,22 @@ request_on_file(void *fname)
 
     /* write lines to queue when possible
        until file completely processed, then return */
-    while(fscanf(infile, INPUTFS, hostname) > 0) {
+
+    for(;;) {
+        //get lock
+        pthread_mutex_lock(&fm);
+        if(fscanf(infile, INPUTFS, hostname) <= 0) {
+            break;
+        }
+        // release lock
+        pthread_mutex_unlock(&fm);
 retry_push:
         err = try_queue_push(hostname);
         if(err == 1) { // queue full
             usleep(random()%100);
             goto retry_push;
+        } else if(err == -1) {
+            exit(EXIT_FAILURE);
         }
     }
 
@@ -95,12 +100,11 @@ look(void *arg)
 {
     void *a = arg;
     a++; a--;
-    char hostbuf[SBUFSIZE];
-    char   ipbuf[INET6_ADDRSTRLEN];
-    char outline[SBUFSIZE + INET6_ADDRSTRLEN];
+    char hostbuf[SBUFSIZE] = "";
+    char   ipbuf[INET6_ADDRSTRLEN] = "";
+    char outline[SBUFSIZE + INET6_ADDRSTRLEN] = "";
 
     for(;;) {
-printf("o");
 retry_qpop:
         /* try acquire a host to process */
         if(try_queue_pop(hostbuf) == QUEUE_EMPTY) {
@@ -138,7 +142,7 @@ try_queue_pop(char *buf)
 {
     int ret;
     char *top;
-    top = NULL;
+//    top = NULL;
 
     // acquire locked access
     pthread_mutex_lock(&qm);
@@ -147,7 +151,7 @@ try_queue_pop(char *buf)
     } else {
         top = queue_pop(&q);
         if(top) {
-            strncpy(buf, top, SBUFSIZE);
+            strcpy(buf, top);
             free(top);
         }
         ret = 0; // good
@@ -176,8 +180,8 @@ try_queue_push(char *buf)
         ret = 1;
     } else {
         n = strlen(buf);
-        str = malloc(n * sizeof(char));
-        strncpy(str, buf, n);
+        str = malloc(n);
+        strcpy(str, buf);
         ret = 0; // note placement in case of failure
         if(queue_push(&q, str) == QUEUE_FAILURE) {
             fprintf(stderr, "Q push failure\n");
@@ -266,12 +270,18 @@ main(int argc, char* argv[])
 
     /* array to track completion of infile processing  */
     fill_success = calloc(n_infiles, sizeof(int));
+    printf("%d\n", n_infiles);
 
     queue_init(&q, QUEUEMAXSIZE);
 
     if(pthread_mutex_init(&qm, NULL) != 0) {
-        fprintf(stderr, "\nmutex init failed\n");
-        return 1;
+        fprintf(stderr, "\nqueue mutex init failed\n");
+        return -1;
+    }
+
+    if(pthread_mutex_init(&fm, NULL) != 0) {
+        fprintf(stderr, "\nfile mutex init failed\n");
+        return -1;
     }
 
     /* start requester thread for each file */
@@ -290,20 +300,15 @@ main(int argc, char* argv[])
 
     /* Rejoin main process upon completion */
     for(i = 0; i < n_infiles; i++)
-        pthread_join(req_tpool[i], (void*) &fill_success[i]); // save return vals
+        pthread_join(req_tpool[i], (void**)&fill_success[i]); // save return vals
     for(i = 0; i < THREAD_MAX; i++)
         pthread_join(res_tpool[i], NULL);
 
-    /* Free acquired memory for pthread handles 
-    for(i = 0; i < n_infiles; i++)
-        free(&res_tpool[i]);
-    for(i = 0; i < THREAD_MAX; i++)
-        free(&req_tpool[i]); */
-
     pthread_mutex_destroy(&qm);
-    fclose(ofile);
+    pthread_mutex_destroy(&fm);
     free(fill_success);
     queue_cleanup(&q);
+    fclose(ofile);
     return EXIT_SUCCESS;
 }
 
