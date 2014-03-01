@@ -4,6 +4,8 @@
 #include <string.h>
 #include <errno.h>
 #include <unistd.h>
+#include <pthread.h>
+
 
 #include "util.h"
 
@@ -14,15 +16,24 @@
 
 #define MIN_RESOLVER_THREADS 2
 
+#define QUEUE_EMPTY 1001
+#define COMPLETE    1002
+
 // globals
 FILE *ofile;
 int THREAD_MAX;
+int n_infiles;
+int *fill_success;
+
+queue q;
+pthread_mutex_t qm;
 
 
+
+/* Go thru lines of a file getting them into the queue */
 int
 request_on_file(char *fname)
 {
-    int success = 0;
     char hostname[SBUFSIZE];
 
     FILE *infile = fopen(fname, "r");
@@ -39,45 +50,42 @@ request_on_file(char *fname)
     }
 
     fclose(inputfp);
-    return success;
-}
-
-int finished(void)
-{
-    int fin = 0;
-
-    // finish condition:
-    // all request on file threads have returned,
-    // i.e., all hostnames added to queue
-    // && the queue is empty,
-    // && ???
-
-    return 0;
+    return COMPLETE;
 }
 
 
-/* Safely get a hostname from queue, write
-   it into buf.
-   Return 0 on success, -1 if queue empty,
-   1 if we know there is work todo but queue empty ???  */
-int try_pop(char *buf)
-{
 
+/* Check saved return values from q request filling
+   threads to see if they're all done. */
+int
+fill_complete(void)
+{
+    int i;
+    for(i = 0; i < n_infile; i++) {
+        if(fill_success[i] != COMPLETE)
+            return 0;
+    }
     return 1;
 }
 
-/*
+
+
+/* Keep popping hostnames and resolv until no work left.
  */
-int look(void)
+int
+look(void)
 {
-    int success = 0;
     char hostbuf[SBUFSIZE];
     char   ipbuf[INET6_ADDRSTRLEN];
     char outline[SBUFSIZE + INET6_ADDRSTRLEN];
 
-    while(!finished()) {
-        // try acquire a host to process
-        try_pop(hostbuf);
+    for(;;) {
+        /* try acquire a host to process */
+        if(try_queue_pop(hostbuf) == QUEUE_EMPTY) {
+            /* If empty queue and all lines have been added, then we done. */
+            if(fill_complete())
+                return EXIT_SUCCESS;
+        }
 
         /* Lookup hostname and get IP string */
         if(dnslookup(hostbuf, ipbuf, sizeof(ipbuf))
@@ -89,14 +97,41 @@ int look(void)
         // build output line
         sprintf(outline, "%s,%s\n", hostbuf, ipbuf);
 
-        if(!try_write_out(outline)) {
+        if(try_write_out(outline) != 0) {
             fprintf(stderr, "fail in writing to file\n");
         }
 
     }
 
-    return success;
+    return EXIT_SUCCESS;
 }
+
+
+
+/* Safely get a hostname from queue, write it into buf.
+   Returns: 0 for okay, or QUEUE_EMPTY in that case.
+ */
+int try_queue_pop(char *buf)
+{
+    int ret;
+    char *top;
+    top = NULL;
+
+    // acquire locked access
+    pthread_mutex_lock(&qm);
+    if(queue_is_empty(q)) {
+        ret = QUEUE_EMPTY;
+    } else {
+        top = queue_pop(q);
+        if(top) {
+            strncpy(top, buf, SBUFSIZE);
+        }
+        ret = 0; // good
+    }
+    pthread_mutex_unlock(&qm);
+    return ret;
+}
+
 
 
 /* Safely add a line to queue */
@@ -110,10 +145,15 @@ try_queue_push(char *)
 
 
 /* Safely add line to ofile. */
+/* Return -1 on problem, 0 otherwise. */
 int
 try_write_out(char *line)
 {
     int success = 0;
+// TODO: acquire lock???
+    if(fprintf(ofile, line) < 0) {
+        return -1;
+    }
 
     return success;
 }
@@ -157,8 +197,10 @@ FILE *process_args(int argc, char **argv)
 int
 main(int argc, char* argv[])
 {
-    int *fill_success;
-    int n_infiles; //number of input files
+    int i, err;
+    pthread_t *req_tpool;
+    pthread_t *res_tpool;
+    pthread_attr_t pt_attr;
 
     // looks like a define constant for conformity...
     THREAD_MAX = nthreads(MIN_RESOLVER_THREADS); // this many work threads
@@ -167,19 +209,51 @@ main(int argc, char* argv[])
     /* verify inputs and get outfile ptr */
     ofile = process_args(argc, argv);
 
+    req_tpool = (pthread_t *) malloc(n_infiles  * sizeof(pthread_t));
+    res_tpool = (pthread_t *) malloc(THREAD_MAX * sizeof(pthread_t));
+    pthread_attr_init(&pt_attr);
+
+
     /* array to track completion of infile processing  */
     fill_success = calloc(n_infiles, sizeof(int));
 
-    /* Loop Through Input Files, launching a thread for each */
-    for(i = 1; i < (argc-1); i++) {
-        // launch:
-        fill_success[i-1] = go request_on_file(argv[i]);
+    queue_init(&q, QUEUEMAXSIZE);
+
+    if(pthread_mutex_init(&qm, NULL) != 0) {
+        fprintf(2, "\nmutex init failed\n");
+        return 1;
     }
 
-}
+    /* start requester thread for each file */
+    for(i = 1; i < (argc-1); i++) {
+        err = pthread_create(&req_tpool[i-1], &pt_attr,
+                             request_on_file, (void *)argv[i]);
+        if(err != 0)
+            fprintf(2, "\nfailed to create thread :[%s]", strerror(err));
+    }
+    /* start resolver thread for each core */
+    for(i = 0; i < THREAD_MAX; i++) {
+        err = pthread_create(&res_tpool[i], &pt_attr, look, (void *)NULL);
+        if(err != 0)
+            fprintf(2, "\nfailed to create thread :[%s]", strerror(err));
+    }
 
-free(fill_success);
-fclose(ofile);
-return EXIT_SUCCESS;
+    /* Rejoin main process upon completion */
+    for(i = 0; i < n_infiles; i++)
+        pthread_join(res_tpool[i], &fill_success[i]); // save return vals
+    for(i = 0; i < THREAD_MAX; i++)
+        pthread_join(req_tpool[i], NULL);
+
+    /* Free acquired memory for pthread handles */
+    for(i = 0; i < n_infiles; i++)
+        free(res_tpool[i]);
+    for(i = 0; i < THREAD_MAX; i++)
+        free(req_tpool[i]);
+
+    pthread_mutex_destroy(&qm);
+    fclose(ofile);
+    free(fill_success);
+    queue_cleanup(&q);
+    return EXIT_SUCCESS;
 }
 
