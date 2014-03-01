@@ -95,6 +95,7 @@ void *
 look(void *arg)
 {
     arg = NULL;
+//    arg++; arg--;
     char hostbuf[SBUFSIZE] = "";
     char   ipbuf[INET6_ADDRSTRLEN] = "";
     char outline[SBUFSIZE + INET6_ADDRSTRLEN] = "";
@@ -175,7 +176,7 @@ try_queue_push(char *buf)
     } else {
         n = strlen(buf);
         str = (char*) malloc(n * sizeof(char));
-        strncpy(str, buf, n);
+        strcpy(str, buf);
         ret = 0; // note placement in case of failure
         if(queue_push(&q, str) == QUEUE_FAILURE) { // this should be a race case
             fprintf(stderr, "Q push failure\n");
@@ -195,7 +196,7 @@ int
 try_write_out(char *line)
 {
     int success = 0;
-    if(fprintf(ofile, line) < 0) {
+    if(fprintf(ofile, "%s", line) < 0) {
         return -1;
     }
     fflush(ofile);
