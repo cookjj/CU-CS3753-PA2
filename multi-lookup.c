@@ -32,12 +32,23 @@ queue q;
 pthread_mutex_t qm;
 pthread_mutex_t fm;
 
+int donei; // accumulator for finished queue fillers semaphor
+
+
 /* Check saved return values from q request filling
    threads to see if they're all done. */
 int
 fill_complete(void)
 {
     int i, val;
+#if 0
+    for(i = 0; i < n_infiles; i++) {
+        val = fill_success[i];
+        printf("\nfs: %d\n", val);
+        if(val != COMPLETE)
+            return 0;
+    }
+#endif
 
     for(i = 0; i < n_infiles; i++) {
         val = fill_success[i];
@@ -69,25 +80,24 @@ request_on_file(void *fname)
        until file completely processed, then return */
 
     for(;;) {
-        //get lock
-        pthread_mutex_lock(&fm);
         if(fscanf(infile, INPUTFS, hostname) <= 0) {
             break;
         }
-        // release lock
-        pthread_mutex_unlock(&fm);
 retry_push:
         err = try_queue_push(hostname);
         if(err == 1) { // queue full
             usleep(random()%100);
             goto retry_push;
         } else if(err == -1) {
-            exit(EXIT_FAILURE);
+            pthread_exit((void*)EXIT_FAILURE);
         }
     }
 
     fclose(infile);
-    return (void *)COMPLETE;
+    pthread_mutex_lock(&fm);
+    fill_success[donei++] = COMPLETE;
+    pthread_mutex_unlock(&fm);
+    pthread_exit((void*)COMPLETE);
 }
 
 
@@ -98,8 +108,7 @@ retry_push:
 void *
 look(void *arg)
 {
-    void *a = arg;
-    a++; a--;
+    arg = NULL;
     char hostbuf[SBUFSIZE] = "";
     char   ipbuf[INET6_ADDRSTRLEN] = "";
     char outline[SBUFSIZE + INET6_ADDRSTRLEN] = "";
@@ -109,17 +118,18 @@ retry_qpop:
         /* try acquire a host to process */
         if(try_queue_pop(hostbuf) == QUEUE_EMPTY) {
             /* If empty queue and all lines have been added, then we done. */
-            if(fill_complete())
+            if(fill_complete()) {
                 return EXIT_SUCCESS;
-            else
+            } else {
                 goto retry_qpop;
+            }
         }
 
         /* Lookup hostname and get IP string */
         if(dnslookup(hostbuf, ipbuf, sizeof(ipbuf))
                 == UTIL_FAILURE) {
             fprintf(stderr, "dnslookup error: %s\n", hostbuf);
-            strncpy(ipbuf, "", sizeof(ipbuf));
+            strcpy(ipbuf, "");
         }
 
         // build output line
@@ -142,7 +152,7 @@ try_queue_pop(char *buf)
 {
     int ret;
     char *top;
-//    top = NULL;
+    top = NULL;
 
     // acquire locked access
     pthread_mutex_lock(&qm);
@@ -200,11 +210,11 @@ int
 try_write_out(char *line)
 {
     int success = 0;
-// TODO: acquire lock???
+//    pthread_mutex_lock(&fm);
     if(fprintf(ofile, line) < 0) {
         return -1;
     }
-
+//    pthread_mutex_unlock(&fm);
     return success;
 }
 
@@ -252,6 +262,7 @@ process_args(int argc, char **argv)
 int
 main(int argc, char* argv[])
 {
+    donei = 0;
     int i, err;
     pthread_t *res_tpool;
     pthread_attr_t pt_attr;
@@ -270,7 +281,6 @@ main(int argc, char* argv[])
 
     /* array to track completion of infile processing  */
     fill_success = calloc(n_infiles, sizeof(int));
-    printf("%d\n", n_infiles);
 
     queue_init(&q, QUEUEMAXSIZE);
 
@@ -293,14 +303,15 @@ main(int argc, char* argv[])
     }
     /* start resolver thread for each core */
     for(i = 0; i < THREAD_MAX; i++) {
-        err = pthread_create(&res_tpool[i], &pt_attr, look, (void *)NULL);
+        err = pthread_create(&res_tpool[i], &pt_attr, look, NULL);
         if(err != 0)
             fprintf(stderr, "\nfailed to create thread :[%s]", strerror(err));
     }
 
     /* Rejoin main process upon completion */
-    for(i = 0; i < n_infiles; i++)
-        pthread_join(req_tpool[i], (void**)&fill_success[i]); // save return vals
+    for(i = 0; i < n_infiles; i++) {
+        pthread_join(req_tpool[i], (void**) &fill_success[i]); // save return vals
+    }
     for(i = 0; i < THREAD_MAX; i++)
         pthread_join(res_tpool[i], NULL);
 
