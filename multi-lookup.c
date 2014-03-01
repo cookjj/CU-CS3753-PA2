@@ -29,10 +29,9 @@ int *fill_success;
 pthread_t *req_tpool;
 queue q;
 
-pthread_mutex_t qm;
-pthread_mutex_t fm;
-
-int donei; // accumulator for finished queue fillers semaphor
+pthread_mutex_t qm; // queue mutex
+pthread_mutex_t fm; // fill success array mutex
+int donei; // accumulator for fill success array index
 
 
 /* Check saved return values from q request filling
@@ -41,15 +40,6 @@ int
 fill_complete(void)
 {
     int i, val;
-#if 0
-    for(i = 0; i < n_infiles; i++) {
-        val = fill_success[i];
-        printf("\nfs: %d\n", val);
-        if(val != COMPLETE)
-            return 0;
-    }
-#endif
-
     for(i = 0; i < n_infiles; i++) {
         val = fill_success[i];
         if(val != COMPLETE)
@@ -60,14 +50,13 @@ fill_complete(void)
 }
 
 
-
 /* Go thru lines of a file getting them into the queue */
 void *
 request_on_file(void *fname)
 {
     int err;
-    char hostname[SBUFSIZE];
-    char errorstr[SBUFSIZE];
+    char hostname[SBUFSIZE] = "";
+    char errorstr[SBUFSIZE] = "";
 
     FILE *infile = fopen((char *)fname, "r");
     if(!infile) {
@@ -78,25 +67,21 @@ request_on_file(void *fname)
 
     /* write lines to queue when possible
        until file completely processed, then return */
-
-    for(;;) {
-        if(fscanf(infile, INPUTFS, hostname) <= 0) {
-            break;
-        }
-retry_push:
+    while((fscanf(infile, INPUTFS, hostname) > 0)) {
         err = try_queue_push(hostname);
         if(err == 1) { // queue full
             usleep(random()%100);
-            goto retry_push;
+            continue;
         } else if(err == -1) {
             pthread_exit((void*)EXIT_FAILURE);
         }
     }
 
-    fclose(infile);
     pthread_mutex_lock(&fm);
     fill_success[donei++] = COMPLETE;
     pthread_mutex_unlock(&fm);
+
+    fclose(infile);
     pthread_exit((void*)COMPLETE);
 }
 
@@ -114,14 +99,13 @@ look(void *arg)
     char outline[SBUFSIZE + INET6_ADDRSTRLEN] = "";
 
     for(;;) {
-retry_qpop:
         /* try acquire a host to process */
         if(try_queue_pop(hostbuf) == QUEUE_EMPTY) {
             /* If empty queue and all lines have been added, then we done. */
             if(fill_complete()) {
                 return EXIT_SUCCESS;
             } else {
-                goto retry_qpop;
+                continue;
             }
         }
 
@@ -154,17 +138,16 @@ try_queue_pop(char *buf)
     char *top;
     top = NULL;
 
-    // acquire locked access
     pthread_mutex_lock(&qm);
     if(queue_is_empty(&q)) {
         ret = QUEUE_EMPTY;
     } else {
-        top = queue_pop(&q);
-        if(top) {
+        top = (char*)queue_pop(&q);
+        if(top != NULL) {
             strcpy(buf, top);
             free(top);
         }
-        ret = 0; // good
+        ret = 0; /* good */
     }
 
     pthread_mutex_unlock(&qm);
@@ -190,11 +173,12 @@ try_queue_push(char *buf)
         ret = 1;
     } else {
         n = strlen(buf);
-        str = malloc(n);
-        strcpy(str, buf);
+        str = (char*) malloc(n * sizeof(char));
+        strncpy(str, buf, n);
         ret = 0; // note placement in case of failure
-        if(queue_push(&q, str) == QUEUE_FAILURE) {
+        if(queue_push(&q, str) == QUEUE_FAILURE) { // this should be a race case
             fprintf(stderr, "Q push failure\n");
+            exit(-1);
             ret = -1;
         }
     }
@@ -210,11 +194,10 @@ int
 try_write_out(char *line)
 {
     int success = 0;
-//    pthread_mutex_lock(&fm);
     if(fprintf(ofile, line) < 0) {
         return -1;
     }
-//    pthread_mutex_unlock(&fm);
+    fflush(ofile);
     return success;
 }
 
@@ -310,7 +293,7 @@ main(int argc, char* argv[])
 
     /* Rejoin main process upon completion */
     for(i = 0; i < n_infiles; i++) {
-        pthread_join(req_tpool[i], (void**) &fill_success[i]); // save return vals
+        pthread_join(req_tpool[i], NULL); // save return vals
     }
     for(i = 0; i < THREAD_MAX; i++)
         pthread_join(res_tpool[i], NULL);
@@ -319,6 +302,8 @@ main(int argc, char* argv[])
     pthread_mutex_destroy(&fm);
     free(fill_success);
     queue_cleanup(&q);
+    free(res_tpool);
+    free(req_tpool);
     fclose(ofile);
     return EXIT_SUCCESS;
 }
