@@ -1,13 +1,14 @@
 
+#include <signal.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
 #include <errno.h>
 #include <unistd.h>
 #include <pthread.h>
-
-
+#include "queue.h"
 #include "util.h"
+#include "multi-lookup.h"
 
 #define MINARGS 3
 #define USAGE "<inputFilePath> <outputFilePath>"
@@ -25,21 +26,46 @@ int THREAD_MAX;
 int n_infiles;
 int *fill_success;
 
+pthread_t *req_tpool;
 queue q;
 pthread_mutex_t qm;
 
 
+/* Check saved return values from q request filling
+   threads to see if they're all done. */
+int
+fill_complete(void)
+{
+    int i, val;
+/*
+    for(i = 0; i < n_infiles; i++) {
+        val = fill_success[i];
+        printf("val[%d] == %d\n", i, val);
+        if(val != COMPLETE)
+            return 0;
+    }*/
+
+    for(i = 0; i < n_infiles; i++) {
+        val = pthread_kill(req_tpool[i], 0);
+        if(val == 0) return 0; // still going
+    }
+
+    return 1;
+}
+
+
 
 /* Go thru lines of a file getting them into the queue */
-int
-request_on_file(char *fname)
+void *
+request_on_file(void *fname)
 {
     int err;
     char hostname[SBUFSIZE];
+    char errorstr[SBUFSIZE];
 
-    FILE *infile = fopen(fname, "r");
-    if(!inputfp) {
-        sprintf(errorstr, "Error Opening Input File: %s", argv[i]);
+    FILE *infile = fopen((char *)fname, "r");
+    if(!infile) {
+        sprintf(errorstr, "Error Opening Input File: %s", (char*)fname);
         perror(errorstr);
         exit(EXIT_FAILURE);
     }
@@ -55,42 +81,34 @@ retry_push:
         }
     }
 
-    fclose(inputfp);
-    return COMPLETE;
+    fclose(infile);
+    return (void *)COMPLETE;
 }
 
-
-
-/* Check saved return values from q request filling
-   threads to see if they're all done. */
-int
-fill_complete(void)
-{
-    int i;
-    for(i = 0; i < n_infile; i++) {
-        if(fill_success[i] != COMPLETE)
-            return 0;
-    }
-    return 1;
-}
 
 
 
 /* Keep popping hostnames and resolv until no work left.
  */
-int
-look(void)
+void *
+look(void *arg)
 {
+    void *a = arg;
+    a++; a--;
     char hostbuf[SBUFSIZE];
     char   ipbuf[INET6_ADDRSTRLEN];
     char outline[SBUFSIZE + INET6_ADDRSTRLEN];
 
     for(;;) {
+printf("o");
+retry_qpop:
         /* try acquire a host to process */
         if(try_queue_pop(hostbuf) == QUEUE_EMPTY) {
             /* If empty queue and all lines have been added, then we done. */
             if(fill_complete())
                 return EXIT_SUCCESS;
+            else
+                goto retry_qpop;
         }
 
         /* Lookup hostname and get IP string */
@@ -124,12 +142,12 @@ try_queue_pop(char *buf)
 
     // acquire locked access
     pthread_mutex_lock(&qm);
-    if(queue_is_empty(q)) {
+    if(queue_is_empty(&q)) {
         ret = QUEUE_EMPTY;
     } else {
-        top = queue_pop(q);
+        top = queue_pop(&q);
         if(top) {
-            strncpy(top, buf, SBUFSIZE);
+            strncpy(buf, top, SBUFSIZE);
             free(top);
         }
         ret = 0; // good
@@ -154,15 +172,15 @@ try_queue_push(char *buf)
 
     // acquire locked access
     pthread_mutex_lock(&qm);
-    if(queue_is_full(q)) {
+    if(queue_is_full(&q)) {
         ret = 1;
     } else {
         n = strlen(buf);
         str = malloc(n * sizeof(char));
         strncpy(str, buf, n);
         ret = 0; // note placement in case of failure
-        if(queue_push(q, str) == QUEUE_FAILURE) {
-            fprintf(2, "Q push failure\n");
+        if(queue_push(&q, str) == QUEUE_FAILURE) {
+            fprintf(stderr, "Q push failure\n");
             ret = -1;
         }
     }
@@ -193,11 +211,15 @@ try_write_out(char *line)
 FILE *
 process_args(int argc, char **argv)
 {
+    int i;
+    FILE *inputfp;
+    char errorstr[SBUFSIZE];
+
     /* Check Arguments */
     if(argc < MINARGS) {
         fprintf(stderr, "Not enough arguments: %d\n", (argc - 1));
         fprintf(stderr, "Usage:\n %s %s\n", argv[0], USAGE);
-        return EXIT_FAILURE;
+        exit(EXIT_FAILURE);
     }
 
     /* Loop Through Input Files just to check they are readable */
@@ -216,7 +238,7 @@ process_args(int argc, char **argv)
     FILE *outputfp = fopen(argv[(argc-1)], "w");
     if(!outputfp) {
         perror("Error Opening Output File");
-        return EXIT_FAILURE;
+        exit(EXIT_FAILURE);
     }
 
     return outputfp;
@@ -227,7 +249,6 @@ int
 main(int argc, char* argv[])
 {
     int i, err;
-    pthread_t *req_tpool;
     pthread_t *res_tpool;
     pthread_attr_t pt_attr;
 
@@ -249,7 +270,7 @@ main(int argc, char* argv[])
     queue_init(&q, QUEUEMAXSIZE);
 
     if(pthread_mutex_init(&qm, NULL) != 0) {
-        fprintf(2, "\nmutex init failed\n");
+        fprintf(stderr, "\nmutex init failed\n");
         return 1;
     }
 
@@ -258,26 +279,26 @@ main(int argc, char* argv[])
         err = pthread_create(&req_tpool[i-1], &pt_attr,
                              request_on_file, (void *)argv[i]);
         if(err != 0)
-            fprintf(2, "\nfailed to create thread :[%s]", strerror(err));
+            fprintf(stderr, "\nfailed to create thread :[%s]", strerror(err));
     }
     /* start resolver thread for each core */
     for(i = 0; i < THREAD_MAX; i++) {
         err = pthread_create(&res_tpool[i], &pt_attr, look, (void *)NULL);
         if(err != 0)
-            fprintf(2, "\nfailed to create thread :[%s]", strerror(err));
+            fprintf(stderr, "\nfailed to create thread :[%s]", strerror(err));
     }
 
     /* Rejoin main process upon completion */
     for(i = 0; i < n_infiles; i++)
-        pthread_join(res_tpool[i], &fill_success[i]); // save return vals
+        pthread_join(req_tpool[i], (void*) &fill_success[i]); // save return vals
     for(i = 0; i < THREAD_MAX; i++)
-        pthread_join(req_tpool[i], NULL);
+        pthread_join(res_tpool[i], NULL);
 
-    /* Free acquired memory for pthread handles */
+    /* Free acquired memory for pthread handles 
     for(i = 0; i < n_infiles; i++)
-        free(res_tpool[i]);
+        free(&res_tpool[i]);
     for(i = 0; i < THREAD_MAX; i++)
-        free(req_tpool[i]);
+        free(&req_tpool[i]); */
 
     pthread_mutex_destroy(&qm);
     fclose(ofile);

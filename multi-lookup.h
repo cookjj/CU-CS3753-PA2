@@ -3,12 +3,12 @@
 FILE *process_args(int, char**);
 
 
-int request_on_file(char *fname);
-int look(void);
+void *request_on_file(void *);
+void *look(void *);
 
-int try_queue_push(char *host);
-int try_queue_pop(char *buf);
-int try_write_out(char *line);
+int try_queue_push(char *);
+int try_queue_pop(char *);
+int try_write_out(char *);
 
 int finished(void);
 
